@@ -1,75 +1,9 @@
 import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
-//class Receiver implements ReceiverInterface {
-//    public Receiver(RestaurantManagement rm) {
-//        this.rm = rm;
-//    }
-//
-//    @Override
-//    public void mealReady(int orderID) {
-//        System.out.println("Rc::mealReady(" + orderID + ")");
-//        rm.on_mealReady(orderID);
-//    }
-//
-//    private RestaurantManagement rm;
-//}
-//
-//class Orderer implements OrderInterface {
-//    public Orderer(RestaurantManagement rm) {
-//        this.rm = rm;
-//    }
-//
-//    @Override
-//    public void newOrder(int orderID, int tableID) {
-//        System.out.println("Or::newOrder(" + orderID + ", " + tableID + ")");
-//        rm.on_newOrder(orderID, tableID);
-//    }
-//
-//    @Override
-//    public void orderComplete(int orderID, int tableID) {
-//        System.out.println("Or::orderComplete(" + orderID + ", " + tableID + ")");
-//        rm.on_orderComplete(orderID, tableID);
-//    }
-//
-//    private RestaurantManagement rm;
-//}
-//
-//class Kitchen implements ReceiverInterface, {
-//    public Kitchen(KitchenInterface kitchen) {
-//        kitchen.registerReceiver(this);
-//        this.kitchen = kitchen;
-//    }
-//
-//    void addOrderToPrepare(int orderID) {
-//        cookingOrders.add(orderID);
-//    }
-//
-//    @Override
-//    public void mealReady(int orderID) {
-//        System.out.println("Kt::mealReady(" + orderID + ")");
-//
-//
-//        rm.on_mealReady(orderID);
-//    }
-//
-//    public boolean prepare(int orderID) {
-//        if (tasks.get() < kitchen.getNumberOfParallelTasks()) {
-//            kitchen.prepare(orderID);
-//            return true;
-//        }
-//
-//        return false;
-//    }
-//
-//    KitchenInterface kitchen;
-//
-//    private PriorityBlockingQueue<Integer> cookingOrders = new PriorityBlockingQueue<>();
-//    private AtomicInteger tasks = new AtomicInteger(0);
-//}
 
 class Waiter {
     public static AtomicInteger total = new AtomicInteger(0);
@@ -116,7 +50,35 @@ class Waiter {
     private int tableID;
 }
 
+class StartCooker extends Thread {
+    public StartCooker(Semaphore startCookingSem, RestaurantManagement rm) {
+        this.rm = rm;
+        this.startCookingSem = startCookingSem;
+    }
+
+    public void run() {
+        while (true) {
+//            System.out.println("StartCooker .... ");
+            rm.newOrderHelper();
+
+            try {
+                this.join(10);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    RestaurantManagement rm;
+    private Semaphore startCookingSem;
+}
+
 class RestaurantManagement implements RestaurantManagementInterface, OrderInterface, ReceiverInterface {
+    public RestaurantManagement() {
+        sc = new StartCooker(startCookingSem, this);
+        sc.start();
+    }
+
     @Override
     public void addWaiter(WaiterInterface waiter) {
 //        System.out.println("RM::addWaiter(" + waiter.getID() + ")");
@@ -125,20 +87,20 @@ class RestaurantManagement implements RestaurantManagementInterface, OrderInterf
 
     @Override
     public void removeWaiter(WaiterInterface waiter) {
-        System.out.println("RM::removeWaiter(" + waiter.getID() + ")");
+//        System.out.println("RM::removeWaiter(" + waiter.getID() + ")");
 
         if (waiters.get(waiter.getID()).getStaus() == Waiter.Status.READY) {
             removeWaiterHelper(waiter);
-            System.out.println("RM::removeWaiter(" + waiter.getID() + ") - waiter status Free => removed");
+//            System.out.println("RM::removeWaiter(" + waiter.getID() + ") - waiter status Free => removed");
         } else {
             waiters.get(waiter.getID()).setStatus(Waiter.Status.TO_REMOVE);
-            System.out.println("RM::removeWaiter(" + waiter.getID() + ") - waiter is working => remove later when meal complete");
+//            System.out.println("RM::removeWaiter(" + waiter.getID() + ") - waiter is working => remove later when meal complete");
         }
     }
 
     public void removeWaiterHelper(WaiterInterface waiter) {
-        if (waiters.get(waiter.getID()).getStaus() == Waiter.Status.WORKING)
-            System.out.println("ERROR: invalid waiter remove *******************************************************");
+//        if (waiters.get(waiter.getID()).getStaus() == Waiter.Status.WORKING)
+//            System.out.println("ERROR: invalid waiter remove *******************************************************");
 
         Waiter.total.decrementAndGet();
         Waiter.free.decrementAndGet();
@@ -152,6 +114,9 @@ class RestaurantManagement implements RestaurantManagementInterface, OrderInterf
         this.kitchen = kitchen;
     }
 
+    private Semaphore startCookingSem = new Semaphore(1);
+    private StartCooker sc;
+
     private KitchenInterface kitchen;
     private AtomicInteger kitchenTasks = new AtomicInteger(0);
 
@@ -162,24 +127,35 @@ class RestaurantManagement implements RestaurantManagementInterface, OrderInterf
 
     private PriorityBlockingQueue<Integer> mealReadyQueue = new PriorityBlockingQueue<>();
 
-    private void newOrderHelper() {
+    public void newOrderHelper() {
+        try {
+            startCookingSem.acquire();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+
         while (!newOrdersQueue.isEmpty()) {
+//            System.out.println(kitchenTasks.get() + " < Math.min(" + kitchen.getNumberOfParallelTasks() + ", " + waiters.size() + ")");
             if (kitchenTasks.get() < Math.min(kitchen.getNumberOfParallelTasks(), waiters.size())) {
                 kitchenTasks.incrementAndGet();
                 int id = newOrdersQueue.poll();
                 kitchen.prepare(id);
+                startCookingSem.release();
 //                System.out.println("RM::newOrder() - kitchen start cooking: " + id + ". Tasks: " + kitchenTasks.get());
             } else {
 //                System.out.println("RM::newOrder() - kitchen cannot start cook new order(" + newOrdersQueue.size() + ") current tasks: " + kitchenTasks.get());
+                startCookingSem.release();
                 return;
             }
         }
+
+        startCookingSem.release();
     }
 
     @Override
     public void newOrder(int orderID, int tableID) {
         synchronized (this) {
-        System.out.println("RM::newOrder(" + orderID + ", " + tableID + ")");
+
             order2table.put(orderID, tableID);
             newOrdersQueue.add(orderID);
 
